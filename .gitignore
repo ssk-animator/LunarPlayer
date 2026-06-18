@@ -1,0 +1,51 @@
+# Build
+build/
+*.exe
+*.lib
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.obj
+*.o
+*.a
+moc_*
+ui_*
+qrc_*
+*_autogen/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+*.sdf
+ipch/
+*.VC.db
+*.VC.opendb
+
+# Qt Creator
+*.pro.user
+*.pro.user.*
+CMakeLists.txt.user*
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Evidence output (user-generated, not source)
+Phase1_Acceptance_Evidence/
+build/manual_qa_evidence/
+build/acceptance_report/
+
+# Temp
+*.tmp
+
+# FFmpeg binaries (too large for git - download separately)
+third_party/*.exe
+third_party/bin/
+third_party/doc/
+third_party/lib/*.lib
+third_party/lib/*.dll.a
+third_party/_tmp/
+third_party/presets/
