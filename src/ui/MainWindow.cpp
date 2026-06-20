@@ -160,7 +160,7 @@ MainWindow::MainWindow(QWidget *parent)
         if (!m_playing || !m_session.isOpen() || m_seeking)
             return;
         if (m_session.readFrame()) {
-            m_videoWidget->setFrame(m_session.currentFrame());
+            applyCurrentFrame();
         } else {
             m_playing = false;
             updatePlaybackState();
@@ -292,7 +292,7 @@ void MainWindow::loadFile(const QString &path)
     m_currentPosSec = 0.0;
 
     m_session.readFrame();
-    m_videoWidget->setFrame(m_session.currentFrame());
+    applyCurrentFrame();
 
     m_playing = true;
     updatePlaybackState();
@@ -338,10 +338,18 @@ void MainWindow::seekBySliderReleased()
     m_pendingSeek = false;
 
     if (m_session.readFrame()) {
-        m_videoWidget->setFrame(m_session.currentFrame());
+        applyCurrentFrame();
     }
 
     m_seeking = false;
+}
+
+void MainWindow::applyCurrentFrame()
+{
+    if (m_videoWidget->rendererSupportsAVFrame() && m_session.decodedFrame())
+        m_videoWidget->setAVFrame(m_session.decodedFrame());
+    else
+        applyCurrentFrame();
 }
 
 void MainWindow::updateTimerTick()
@@ -361,7 +369,7 @@ void MainWindow::updateTimerTick()
         m_currentPosSec = 0.0;
         m_session.seekSec(0);
         m_session.readFrame();
-        m_videoWidget->setFrame(m_session.currentFrame());
+        applyCurrentFrame();
     }
 
     int totalMs = static_cast<int>(m_session.durationSec() * 1000.0);
@@ -431,7 +439,7 @@ void MainWindow::keyPressEvent(QKeyEvent *event)
         m_session.seekSec(newPos);
         m_currentPosSec = newPos;
         if (m_session.readFrame())
-            m_videoWidget->setFrame(m_session.currentFrame());
+            applyCurrentFrame();
         break;
     }
     case Qt::Key_Right: {
@@ -440,7 +448,7 @@ void MainWindow::keyPressEvent(QKeyEvent *event)
         m_session.seekSec(newPos);
         m_currentPosSec = newPos;
         if (m_session.readFrame())
-            m_videoWidget->setFrame(m_session.currentFrame());
+            applyCurrentFrame();
         break;
     }
     case Qt::Key_Escape:

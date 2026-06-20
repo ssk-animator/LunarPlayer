@@ -27,6 +27,7 @@ public:
     void close();
     bool readFrame();
     QImage currentFrame() const { return m_frame; }
+    AVFrame* decodedFrame() const { return m_decodedFrame; }
     double durationSec() const { return m_durationSec; }
     void seekSec(double sec);
     int fps() const { return m_fps; }
@@ -80,6 +81,9 @@ private:
     void setupUI();
     void updatePlaybackState();
     void updateTitle();
+
+public:
+    void applyCurrentFrame();
 
     VideoWidget *m_videoWidget;
     QPushButton *m_playBtn;

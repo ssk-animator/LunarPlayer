@@ -41,6 +41,13 @@ build/acceptance_report/
 # Temp
 *.tmp
 
+# Generated test output
+*_rendered_output.png
+smoke_*.txt
+build_log*.txt
+smoke_output.txt
+smoke_error.txt
+
 # FFmpeg binaries (too large for git - download separately)
 third_party/*.exe
 third_party/bin/

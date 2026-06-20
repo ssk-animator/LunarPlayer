@@ -63,6 +63,15 @@ add_executable(LunarPlayer WIN32
     src/ui/MainWindow.h
     src/ui/VideoWidget.cpp
     src/ui/VideoWidget.h
+    src/renderer/Renderer.h
+    src/renderer/RendererFactory.cpp
+    src/renderer/RendererFactory.h
+    src/renderer/CPURenderer.cpp
+    src/renderer/CPURenderer.h
+    src/renderer/GLVideoRenderer.cpp
+    src/renderer/GLVideoRenderer.h
+    src/renderer/YUVVideoRenderer.cpp
+    src/renderer/YUVVideoRenderer.h
 )
 
 target_include_directories(LunarPlayer PRIVATE src "${FFMPEG_DIR}/include")
@@ -82,6 +91,14 @@ set(LUNAR_TEST_COMMON
     Qt6::Core Qt6::Test
     ${AVCODEC} ${AVFORMAT} ${AVUTIL} ${SWRESAMPLE} ${SWSCALE}
 )
+
+# MediaSession API Stability
+add_executable(LunarPlayerMediaSessionTest tests/test_mediasession.cpp src/ui/MainWindow.cpp src/ui/VideoWidget.cpp src/renderer/RendererFactory.cpp src/renderer/RendererFactory.h src/renderer/CPURenderer.cpp src/renderer/CPURenderer.h src/renderer/GLVideoRenderer.cpp src/renderer/GLVideoRenderer.h src/renderer/YUVVideoRenderer.cpp src/renderer/YUVVideoRenderer.h)
+target_include_directories(LunarPlayerMediaSessionTest PRIVATE src "${FFMPEG_DIR}/include")
+target_link_libraries(LunarPlayerMediaSessionTest PRIVATE Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets ${LUNAR_TEST_COMMON})
+lunar_deploy_dlls(LunarPlayerMediaSessionTest)
+
+add_test(NAME MediaSessionAPI COMMAND LunarPlayerMediaSessionTest)
 
 # FFmpeg Basics
 add_executable(LunarPlayerTest tests/test_ffmpeg.cpp)
@@ -109,8 +126,21 @@ lunar_deploy_dlls(LunarPlayerQATest)
 
 add_test(NAME HumanQA COMMAND LunarPlayerQATest)
 
+# ---- GPU Prove Test (manual, not part of CTest) ----
+add_executable(LunarPlayerGPUProve
+    tests/test_gpu_prove.cpp
+    src/renderer/GLVideoRenderer.cpp src/renderer/GLVideoRenderer.h
+    src/renderer/CPURenderer.cpp src/renderer/CPURenderer.h
+    src/renderer/YUVVideoRenderer.cpp src/renderer/YUVVideoRenderer.h
+    src/renderer/RendererFactory.cpp src/renderer/RendererFactory.h
+)
+target_include_directories(LunarPlayerGPUProve PRIVATE src "${FFMPEG_DIR}/include")
+target_link_libraries(LunarPlayerGPUProve PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets
+)
+
 # ---- Phase 1 Acceptance Demo ----
-add_executable(LunarPlayerAcceptance tests/test_acceptance.cpp src/ui/MainWindow.cpp src/ui/VideoWidget.cpp)
+add_executable(LunarPlayerAcceptance tests/test_acceptance.cpp src/ui/MainWindow.cpp src/ui/VideoWidget.cpp src/renderer/RendererFactory.cpp src/renderer/RendererFactory.h src/renderer/CPURenderer.cpp src/renderer/CPURenderer.h src/renderer/GLVideoRenderer.cpp src/renderer/GLVideoRenderer.h src/renderer/YUVVideoRenderer.cpp src/renderer/YUVVideoRenderer.h)
 target_include_directories(LunarPlayerAcceptance PRIVATE src "${FFMPEG_DIR}/include")
 target_compile_definitions(LunarPlayerAcceptance PRIVATE TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(LunarPlayerAcceptance PRIVATE
@@ -120,7 +150,7 @@ target_link_libraries(LunarPlayerAcceptance PRIVATE
 lunar_deploy_dlls(LunarPlayerAcceptance)
 
 # ---- Phase 1 Manual QA Logger ----
-add_executable(LunarPlayerManualQA tests/test_manual_qa_logger.cpp src/ui/MainWindow.cpp src/ui/VideoWidget.cpp)
+add_executable(LunarPlayerManualQA tests/test_manual_qa_logger.cpp src/ui/MainWindow.cpp src/ui/VideoWidget.cpp src/renderer/RendererFactory.cpp src/renderer/RendererFactory.h src/renderer/CPURenderer.cpp src/renderer/CPURenderer.h src/renderer/GLVideoRenderer.cpp src/renderer/GLVideoRenderer.h src/renderer/YUVVideoRenderer.cpp src/renderer/YUVVideoRenderer.h)
 target_include_directories(LunarPlayerManualQA PRIVATE src "${FFMPEG_DIR}/include")
 target_compile_definitions(LunarPlayerManualQA PRIVATE TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(LunarPlayerManualQA PRIVATE
@@ -130,13 +160,25 @@ target_link_libraries(LunarPlayerManualQA PRIVATE
 lunar_deploy_dlls(LunarPlayerManualQA)
 
 # ---- CTest: set offscreen for all tests ----
-set_tests_properties(FFmpegBasics Phase1Integration HumanQA PROPERTIES
+set_tests_properties(FFmpegBasics Phase1Integration HumanQA MediaSessionAPI PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
+
+# ---- Phase 2B Playback Smoke Test (manual, requires native display) ----
+add_executable(LunarPlayerPlaybackSmoke tests/test_playback_smoke.cpp src/ui/MainWindow.cpp src/ui/VideoWidget.cpp src/renderer/RendererFactory.cpp src/renderer/RendererFactory.h src/renderer/CPURenderer.cpp src/renderer/CPURenderer.h src/renderer/GLVideoRenderer.cpp src/renderer/GLVideoRenderer.h src/renderer/YUVVideoRenderer.cpp src/renderer/YUVVideoRenderer.h)
+target_include_directories(LunarPlayerPlaybackSmoke PRIVATE src "${FFMPEG_DIR}/include")
+target_compile_definitions(LunarPlayerPlaybackSmoke PRIVATE TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(LunarPlayerPlaybackSmoke PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets
+    ${AVCODEC} ${AVFORMAT} ${AVUTIL} ${SWRESAMPLE} ${SWSCALE}
+)
+lunar_deploy_dlls(LunarPlayerPlaybackSmoke)
 
 if(MSVC)
     target_compile_options(LunarPlayer PRIVATE /utf-8)
     target_compile_options(LunarPlayerTest PRIVATE /utf-8)
     target_compile_options(LunarPlayerPhase1Test PRIVATE /utf-8)
     target_compile_options(LunarPlayerQATest PRIVATE /utf-8)
+    target_compile_options(LunarPlayerMediaSessionTest PRIVATE /utf-8)
+    target_compile_options(LunarPlayerPlaybackSmoke PRIVATE /utf-8)
 endif()
