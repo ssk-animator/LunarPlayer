@@ -1,21 +1,16 @@
 #include "MainWindow.h"
-#include "GradientOverlay.h"
 #include "VideoWidget.h"
 #include "ThumbnailCache.h"
 #include "HoverPreviewWidget.h"
-#include "FullscreenCommandPanel.h"
 #include "Icons.h"
 #include "MediaInfoDialog.h"
 #include "renderer/Renderer.h"
 #include "decoder/AudioDecoder.h"
-#include "decoder/DecoderManager.h"
 #include "audio/AudioOutput.h"
 #include <QApplication>
-#include <QGuiApplication>
 #include <QFileDialog>
 #include <QMenuBar>
 #include <QMenu>
-#include <QToolButton>
 #include <QAction>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -37,13 +32,8 @@
 #include <QStatusBar>
 #include <QRegularExpression>
 #include <QDir>
-#include <QDebug>
 #include <climits>
 #include <cmath>
-
-#ifdef Q_OS_WIN
-#include <windows.h>
-#endif
 
 
 // ============================================================
@@ -51,6 +41,57 @@
 // ============================================================
 
 MediaSession::~MediaSession() { close(); }
+
+static const char* hwDecoderName(AVCodecID codecId, AVHWDeviceType hwType)
+{
+    switch (codecId) {
+    case AV_CODEC_ID_H264:
+        switch (hwType) {
+        case AV_HWDEVICE_TYPE_D3D11VA: return "h264_d3d11va";
+        case AV_HWDEVICE_TYPE_DXVA2:   return "h264_dxva2";
+        case AV_HWDEVICE_TYPE_CUDA:    return "h264_cuviddec";
+        case AV_HWDEVICE_TYPE_QSV:     return "h264_qsv";
+        case AV_HWDEVICE_TYPE_AMF:     return "h264_amf";
+        default: return nullptr;
+        }
+    case AV_CODEC_ID_HEVC:
+        switch (hwType) {
+        case AV_HWDEVICE_TYPE_D3D11VA: return "hevc_d3d11va";
+        case AV_HWDEVICE_TYPE_DXVA2:   return "hevc_dxva2";
+        case AV_HWDEVICE_TYPE_CUDA:    return "hevc_cuviddec";
+        case AV_HWDEVICE_TYPE_QSV:     return "hevc_qsv";
+        case AV_HWDEVICE_TYPE_AMF:     return "hevc_amf";
+        default: return nullptr;
+        }
+    case AV_CODEC_ID_VP9:
+        switch (hwType) {
+        case AV_HWDEVICE_TYPE_D3D11VA: return "vp9_d3d11va";
+        case AV_HWDEVICE_TYPE_CUDA:    return "vp9_cuviddec";
+        default: return nullptr;
+        }
+    case AV_CODEC_ID_AV1:
+        switch (hwType) {
+        case AV_HWDEVICE_TYPE_D3D11VA: return "av1_d3d11va";
+        case AV_HWDEVICE_TYPE_CUDA:    return "av1_cuviddec";
+        default: return nullptr;
+        }
+    default:
+        return nullptr;
+    }
+}
+
+static bool isCodecSupported(AVCodecID id)
+{
+    switch (id) {
+    case AV_CODEC_ID_H264:
+    case AV_CODEC_ID_HEVC:
+    case AV_CODEC_ID_VP9:
+    case AV_CODEC_ID_AV1:
+        return true;
+    default:
+        return false;
+    }
+}
 
 static bool isHWAccelPixelFormat(AVPixelFormat fmt)
 {
@@ -64,6 +105,19 @@ static bool isHWAccelPixelFormat(AVPixelFormat fmt)
         return true;
     default:
         return false;
+    }
+}
+
+static AVHWDeviceType hwDeviceTypeFromPixelFormat(AVPixelFormat fmt)
+{
+    switch (fmt) {
+    case AV_PIX_FMT_CUDA:   return AV_HWDEVICE_TYPE_CUDA;
+    case AV_PIX_FMT_D3D11:  return AV_HWDEVICE_TYPE_D3D11VA;
+    case AV_PIX_FMT_QSV:    return AV_HWDEVICE_TYPE_QSV;
+    case AV_PIX_FMT_DXVA2_VLD: return AV_HWDEVICE_TYPE_DXVA2;
+    case AV_PIX_FMT_VAAPI:  return AV_HWDEVICE_TYPE_VAAPI;
+    case AV_PIX_FMT_AMF_SURFACE: return AV_HWDEVICE_TYPE_AMF;
+    default:                return AV_HWDEVICE_TYPE_NONE;
     }
 }
 
@@ -86,28 +140,61 @@ bool MediaSession::open(const QString &path)
     if (!m_codecCtx) { avformat_close_input(&m_fmtCtx); return false; }
     avcodec_parameters_to_context(m_codecCtx, m_fmtCtx->streams[m_videoStreamIdx]->codecpar);
 
-    m_gpuInfo = detectGPU();
+    m_decoderInfo = {};
+    m_hwPixFmt = AV_PIX_FMT_NONE;
 
-    DecoderConfig decCfg;
-    decCfg.codecpar = m_fmtCtx->streams[m_videoStreamIdx]->codecpar;
-    decCfg.codecId = m_codec->id;
-    decCfg.width = m_codecCtx->width;
-    decCfg.height = m_codecCtx->height;
-    decCfg.bitrate = m_codecCtx->bit_rate;
+    GPUInfo gpu = detectGPU();
 
-    DecoderSelection sel = DecoderManager::selectDecoder(decCfg);
-    if (!sel.valid) {
-        avcodec_free_context(&m_codecCtx);
-        avformat_close_input(&m_fmtCtx);
-        return false;
+    if (isCodecSupported(m_codec->id)) {
+        auto order = probeOrder(gpu);
+
+        for (AVHWDeviceType type : order) {
+            AVBufferRef *hwCtx = nullptr;
+            if (av_hwdevice_ctx_create(&hwCtx, type, nullptr, nullptr, 0) < 0)
+                continue;
+
+            const char *name = hwDecoderName(m_codec->id, type);
+            if (!name) {
+                av_buffer_unref(&hwCtx);
+                continue;
+            }
+
+            const AVCodec *hwCodec = avcodec_find_decoder_by_name(name);
+            if (!hwCodec) {
+                av_buffer_unref(&hwCtx);
+                continue;
+            }
+
+            AVCodecContext *hwCtx2 = avcodec_alloc_context3(hwCodec);
+            if (!hwCtx2) {
+                av_buffer_unref(&hwCtx);
+                continue;
+            }
+            avcodec_parameters_to_context(hwCtx2, m_fmtCtx->streams[m_videoStreamIdx]->codecpar);
+            hwCtx2->hw_device_ctx = av_buffer_ref(hwCtx);
+
+            if (avcodec_open2(hwCtx2, hwCodec, nullptr) < 0) {
+                avcodec_free_context(&hwCtx2);
+                av_buffer_unref(&hwCtx);
+                continue;
+            }
+
+            avcodec_free_context(&m_codecCtx);
+            m_codecCtx = hwCtx2;
+            m_codec = hwCodec;
+            m_hwPixFmt = m_codecCtx->pix_fmt;
+            m_hwDeviceCtx = av_buffer_ref(hwCtx);
+            av_buffer_unref(&hwCtx);
+            break;
+        }
     }
 
-    avcodec_free_context(&m_codecCtx);
-    m_codecCtx = sel.codecCtx;
-    m_codec = sel.codec;
-    m_hwDeviceCtx = sel.hwDeviceCtx;
-    m_hwPixFmt = sel.hwPixFmt;
-    m_decoderInfo = sel.info;
+    if (!m_hwDeviceCtx) {
+        if (avcodec_open2(m_codecCtx, m_codec, nullptr) < 0) {
+            avcodec_free_context(&m_codecCtx); avformat_close_input(&m_fmtCtx);
+            return false;
+        }
+    }
 
     m_width = m_codecCtx->width;
     m_height = m_codecCtx->height;
@@ -142,10 +229,18 @@ bool MediaSession::open(const QString &path)
     m_fps = (avg_fr.den > 0) ? qRound(static_cast<double>(avg_fr.num) / avg_fr.den) : 24;
 
     AVPixelFormat swsSrcFmt = m_codecCtx->pix_fmt;
-    bool isHW = isHWAccelPixelFormat(swsSrcFmt);
-    if (isHW) {
+    m_decoderInfo.hardwareAccelerated = isHWAccelPixelFormat(m_codecCtx->pix_fmt);
+    if (m_decoderInfo.hardwareAccelerated) {
+        m_decoderInfo.backend = typeToBackend(hwDeviceTypeFromPixelFormat(m_codecCtx->pix_fmt));
+        m_decoderInfo.decoderName = backendName(m_decoderInfo.backend);
         swsSrcFmt = AV_PIX_FMT_NV12;
+    } else {
+        av_buffer_unref(&m_hwDeviceCtx);
+        m_hwPixFmt = AV_PIX_FMT_NONE;
+        m_decoderInfo.backend = DecodeBackend::Software;
+        m_decoderInfo.decoderName = "Software";
     }
+    m_decoderInfo.gpuName = gpu.name;
 
     m_swsCtx = sws_getContext(m_width, m_height, swsSrcFmt,
                                m_width, m_height, AV_PIX_FMT_RGB24,
@@ -174,7 +269,7 @@ bool MediaSession::open(const QString &path)
         m_audioCodecName = QString(avcodec_get_name(ast->codecpar->codec_id));
     }
 
-    qDebug() << "GPU:" << m_gpuInfo.name;
+    qDebug() << "GPU:" << gpu.name;
     qDebug() << "Decoder:" << m_decoderInfo.decoderName;
     qDebug() << "Hardware accelerated:" << (m_decoderInfo.hardwareAccelerated ? "yes" : "no");
 
@@ -187,22 +282,19 @@ void MediaSession::close()
     sws_freeContext(m_swsCtx); m_swsCtx = nullptr;
     sws_freeContext(m_convertCtx); m_convertCtx = nullptr;
     av_frame_free(&m_convertedFrame);
-    avcodec_free_context(&m_codecCtx);
-    avformat_close_input(&m_fmtCtx);
+    avcodec_free_context(&m_codecCtx); avformat_close_input(&m_fmtCtx);
     av_buffer_unref(&m_hwDeviceCtx);
     m_videoStreamIdx = -1; m_audioStreamIdx = -1;
     m_audioSampleRate = 0; m_audioChannels = 0;
     m_width = m_height = 0; m_durationSec = 0.0; m_fps = 24;
     m_frame = QImage();
     m_audioStreamCount = 0; m_subtitleStreamCount = 0; m_videoStreamCount = 0;
+    m_decoderInfo = {};
+    m_hwPixFmt = AV_PIX_FMT_NONE;
     m_codecName.clear(); m_codecLongName.clear(); m_profileName.clear();
     m_pixFmtName.clear(); m_colorSpace.clear(); m_hdrType.clear();
     m_bitrate = 0; m_audioCodecName.clear(); m_rendererName.clear();
     m_isImageSequence = false;
-    m_decoderInfo = {};
-    m_hwPixFmt = AV_PIX_FMT_NONE;
-    m_codecCtx = nullptr;
-    m_codec = nullptr;
     flushAudioQueue();
 }
 
@@ -437,12 +529,14 @@ bool MediaSession::openImageSequence(const QString &pattern, int startNum, int f
     m_codecLongName = m_codec ? QString(m_codec->long_name) : QString();
     m_pixFmtName = QString(av_get_pix_fmt_name(m_codecCtx->pix_fmt));
 
-    m_rendererName = "OpenGL YUV";
-    m_gpuInfo = detectGPU();
     m_decoderInfo = {};
     m_decoderInfo.backend = DecodeBackend::Software;
     m_decoderInfo.decoderName = "Software";
-    m_decoderInfo.gpuName = m_gpuInfo.name;
+
+    GPUInfo gpu = detectGPU();
+    m_decoderInfo.gpuName = gpu.name;
+
+    m_rendererName = "OpenGL YUV";
 
     return true;
 }
@@ -507,7 +601,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_fullscreenHideTimer, &QTimer::timeout, this, [this]() {
         if (!m_isFullscreen || !m_controlsVisible) return;
         m_controlsVisible = false;
-        m_fsOverlay->hide();
+        fadeOverlayOut();
         setCursor(Qt::BlankCursor);
     });
 
@@ -534,8 +628,6 @@ MainWindow::MainWindow(QWidget *parent)
                 m_hoverPreview->showThumbnail(thumb, m_hoverTargetTimestamp);
         }
     });
-
-    menuBar()->installEventFilter(this);
 
     m_videoWidget->installEventFilter(this);
     m_videoWidget->setMouseTracking(true);
@@ -858,8 +950,20 @@ void MainWindow::setupUI()
     // ================================================================
     // Fullscreen overlay — minimal strip at bottom
     // ================================================================
-    m_fsOverlay = new GradientOverlay(this);
+    m_fsOverlay = new QWidget(this);
+    m_fsOverlay->setAttribute(Qt::WA_NativeWindow);
     m_fsOverlay->setObjectName("fsOverlay");
+    m_fsOverlay->setStyleSheet(
+        "#fsOverlay {"
+        "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+        "    stop:0 rgba(18,18,18,0),"
+        "    stop:0.2 rgba(18,18,18,50),"
+        "    stop:0.6 rgba(18,18,18,150),"
+        "    stop:1 rgba(18,18,18,230));"
+        "  border-top-left-radius: 12px;"
+        "  border-top-right-radius: 12px;"
+        "}"
+    );
     m_fsOverlay->setFixedHeight(48);
     m_fsOverlay->hide();
 
@@ -896,6 +1000,9 @@ void MainWindow::setupUI()
         if (m_isFullscreen && m_overlayOpacity->opacity() < 0.01)
             m_fsOverlay->hide();
     });
+
+    // Set the permanent opacity effect on fsOverlay (never replace this)
+    m_fsOverlay->setGraphicsEffect(m_overlayOpacity);
 }
 
 void MainWindow::positionControls()
@@ -916,8 +1023,11 @@ void MainWindow::positionControls()
 void MainWindow::fadeOverlayIn()
 {
     if (m_isFullscreen) {
+        if (m_overlayAnim->state() == QPropertyAnimation::Running)
+            m_overlayAnim->stop();
         m_fsOverlay->show();
         m_fsOverlay->raise();
+        m_overlayOpacity->setOpacity(1.0);
     }
 
     // Status bar
@@ -934,8 +1044,11 @@ void MainWindow::fadeOverlayIn()
 void MainWindow::fadeOverlayOut()
 {
     if (m_isFullscreen) {
-        m_fsOverlay->hide();
-        setCursor(Qt::BlankCursor);
+        if (m_overlayAnim->state() == QPropertyAnimation::Running)
+            m_overlayAnim->stop();
+        m_overlayAnim->setStartValue(m_overlayOpacity->opacity());
+        m_overlayAnim->setEndValue(0.0);
+        m_overlayAnim->start();
     }
 }
 
@@ -970,49 +1083,7 @@ void MainWindow::updateOverlayMode()
 void MainWindow::resizeEvent(QResizeEvent *event)
 {
     QMainWindow::resizeEvent(event);
-    if (!m_skipReposition)
-        positionControls();
-}
-
-// ============================================================
-// Modal dialog Z-order helpers
-// ============================================================
-// When the player is in borderless fullscreen it uses HWND_TOPMOST.
-// Without this, native dialogs (QFileDialog, QMessageBox, etc.)
-// open *behind* the player because they cannot break the TOPMOST
-// Z-order.  These helpers temporarily drop TOPMOST around any
-// modal dialog call and restore it afterward.
-
-void MainWindow::beforeModalDialog()
-{
-#ifdef Q_OS_WIN
-    if (m_isFullscreen && m_dialogDepth++ == 0) {
-        HWND hwnd = reinterpret_cast<HWND>(winId());
-        ::SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
-                       SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
-    }
-#endif
-}
-
-void MainWindow::afterModalDialog()
-{
-#ifdef Q_OS_WIN
-    if (m_isFullscreen && --m_dialogDepth == 0) {
-        // Only restore TOPMOST if no other modal dialog is still active
-        // (handles the case of a nested dialog, e.g. error message
-        //  shown after a file dialog).
-        if (QApplication::activeModalWidget() != nullptr)
-            return;
-
-        HWND hwnd = reinterpret_cast<HWND>(winId());
-        QScreen *scr = QGuiApplication::screenAt(QCursor::pos());
-        if (!scr) scr = QGuiApplication::primaryScreen();
-        QRect geo = scr->geometry();
-        ::SetWindowPos(hwnd, HWND_TOPMOST,
-                       geo.x(), geo.y(), geo.width(), geo.height(),
-                       SWP_FRAMECHANGED);
-    }
-#endif
+    positionControls();
 }
 
 // ============================================================
@@ -1022,27 +1093,12 @@ void MainWindow::afterModalDialog()
 void MainWindow::toggleFullscreen()
 {
     if (m_isFullscreen) {
-        // Close any open fullscreen panel
-        if (m_fullscreenPanel) {
-            m_fullscreenPanel->closePanel();
-            m_fullscreenPanel = nullptr;
-        }
-        // Exit borderless → restore original window style
+        if (m_overlayAnim->state() == QPropertyAnimation::Running)
+            m_overlayAnim->stop();
         m_fullscreenHideTimer->stop();
+        m_overlayOpacity->setOpacity(1.0);
         m_fsOverlay->hide();
-
-#ifdef Q_OS_WIN
-        HWND hwnd = reinterpret_cast<HWND>(winId());
-        SetWindowLongPtr(hwnd, GWL_STYLE, m_savedWindowStyle);
-        SetWindowLongPtr(hwnd, GWL_EXSTYLE, m_savedWindowExStyle);
-        // Remove TOPMOST and apply restored style
-        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
-#endif
-        if (!m_savedWindowGeometry.isEmpty())
-            restoreGeometry(m_savedWindowGeometry);
         showNormal();
-
         m_isFullscreen = false;
         m_controlsVisible = false;
         menuBar()->show();
@@ -1051,35 +1107,8 @@ void MainWindow::toggleFullscreen()
         if (m_hoverPreview) m_hoverPreview->hidePreview();
         updateOverlayMode();
     } else {
-        // Enter borderless fullscreen → modify window style in-place (no HWND recreation)
         if (m_hoverPreview) m_hoverPreview->hidePreview();
-        m_savedWindowGeometry = saveGeometry();
-
-#ifdef Q_OS_WIN
-        HWND hwnd = reinterpret_cast<HWND>(winId());
-        m_savedWindowStyle = static_cast<long>(GetWindowLongPtr(hwnd, GWL_STYLE));
-        m_savedWindowExStyle = static_cast<long>(GetWindowLongPtr(hwnd, GWL_EXSTYLE));
-
-        // Remove frame, caption, thick frame → borderless
-        long style = m_savedWindowStyle;
-        style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_DLGFRAME);
-        style |= WS_POPUP | WS_VISIBLE;
-
-        // Remove border-related extended styles
-        long exStyle = m_savedWindowExStyle;
-        exStyle &= ~(WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE);
-
-        SetWindowLongPtr(hwnd, GWL_STYLE, style);
-        SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle);
-
-        // Position to cover full screen (including taskbar), always on top
-        QScreen *scr = QGuiApplication::screenAt(QCursor::pos());
-        if (!scr) scr = QGuiApplication::primaryScreen();
-        QRect geo = scr ? scr->geometry() : geometry();
-        SetWindowPos(hwnd, HWND_TOPMOST, geo.x(), geo.y(), geo.width(), geo.height(),
-                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-#endif
-
+        showFullScreen();
         m_isFullscreen = true;
         m_controlsVisible = true;
         menuBar()->hide();
@@ -1087,6 +1116,7 @@ void MainWindow::toggleFullscreen()
         updateOverlayMode();
         m_fsOverlay->show();
         m_fsOverlay->raise();
+        m_overlayOpacity->setOpacity(1.0);
         setCursor(Qt::ArrowCursor);
         m_fullscreenHideTimer->start();
     }
@@ -1153,7 +1183,7 @@ void MainWindow::setupMenus()
 
     auto *fileMenu = menuBar()->addMenu("&File");
     fileMenu->addAction(LunarIcons::open(), "&Open File...", this, &MainWindow::openFile, QKeySequence::Open);
-    fileMenu->addAction(LunarIcons::open(), "Open Image &Sequence...", this, &MainWindow::openImageSequence);
+    fileMenu->addAction("Open Image &Sequence...", this, &MainWindow::openImageSequence);
     fileMenu->addSeparator();
     fileMenu->addAction("&Close", this, &MainWindow::closeFile, QKeySequence("Ctrl+W"));
     fileMenu->addSeparator();
@@ -1170,10 +1200,8 @@ void MainWindow::setupMenus()
 
     auto *toolsMenu = menuBar()->addMenu("&Tools");
     toolsMenu->addAction("Media &Information...", this, [this]() {
-        beforeModalDialog();
         MediaInfoDialog dlg(m_session.mediaInfo(), this);
         dlg.exec();
-        afterModalDialog();
     });
     toolsMenu->addAction("Performance Information", this, [this]() {
         m_showPerformance = !m_showPerformance;
@@ -1185,13 +1213,10 @@ void MainWindow::setupMenus()
 
     auto *helpMenu = menuBar()->addMenu("&Help");
     helpMenu->addAction("&About Lunar Player", this, [this]() {
-        beforeModalDialog();
         QMessageBox::about(this, "About Lunar Player",
             "Lunar Player\n\nA modern media player for animation, VFX, and editorial review.");
-        afterModalDialog();
     });
     helpMenu->addAction("&Keyboard Shortcuts", this, [this]() {
-        beforeModalDialog();
         QMessageBox::information(this, "Keyboard Shortcuts",
             "Space       Play/Pause\n"
             "S           Stop\n"
@@ -1221,7 +1246,6 @@ void MainWindow::setupMenus()
             "P           Previous File\n"
             "Ctrl+O      Open File\n"
             "Ctrl+W      Close File\n");
-        afterModalDialog();
     });
 }
 
@@ -1252,7 +1276,7 @@ void MainWindow::buildAudioMenu()
         m_stereoModeGroup->addAction(act);
     }
     m_audioMenu->addSeparator();
-    m_muteAction = m_audioMenu->addAction(LunarIcons::volumeMute(), "&Mute");
+    m_muteAction = m_audioMenu->addAction("&Mute");
     m_muteAction->setCheckable(true);
     m_muteAction->setShortcut(QKeySequence("M"));
     connect(m_muteAction, &QAction::toggled, this, [this](bool muted) {
@@ -1260,10 +1284,10 @@ void MainWindow::buildAudioMenu()
         m_volumeBtn->setIcon(muted ? LunarIcons::volumeMute() : LunarIcons::volumeHigh());
     });
     m_audioMenu->addSeparator();
-    m_audioMenu->addAction(LunarIcons::volumeHigh(), "Volume &Up", this, [this]() {
+    m_audioMenu->addAction("Volume &Up", this, [this]() {
         m_volumeSlider->setValue(qMin(100, m_volumeSlider->value() + 10));
     }, QKeySequence("Up"));
-    m_audioMenu->addAction(LunarIcons::volumeLow(), "Volume &Down", this, [this]() {
+    m_audioMenu->addAction("Volume &Down", this, [this]() {
         m_volumeSlider->setValue(qMax(0, m_volumeSlider->value() - 10));
     }, QKeySequence("Down"));
 }
@@ -1280,7 +1304,7 @@ void MainWindow::buildVideoMenu()
         }
     } else { trackMenu->addAction("No Video Tracks")->setEnabled(false); }
     m_videoMenu->addSeparator();
-    m_videoMenu->addAction(LunarIcons::fullscreen(), "&Fullscreen", this, &MainWindow::toggleFullscreen, QKeySequence("F11"));
+    m_videoMenu->addAction("&Fullscreen", this, &MainWindow::toggleFullscreen, QKeySequence("F11"));
     m_videoMenu->addSeparator();
     auto *zoomMenu = m_videoMenu->addMenu("&Zoom");
     m_zoomGroup = new QActionGroup(this); m_zoomGroup->setExclusive(true);
@@ -1297,33 +1321,18 @@ void MainWindow::buildVideoMenu()
     m_videoMenu->addSeparator();
     m_videoMenu->addAction("Crop")->setEnabled(false);
     m_videoMenu->addSeparator();
-    DecoderInfo di = m_session.decoderInfo();
-    GPUInfo gpu = m_session.gpuInfo();
-
-    m_decoderInfoAction = m_videoMenu->addAction("Decoder: " + di.decoderName);
+    m_decoderInfoAction = m_videoMenu->addAction("Decoder: -");
     m_decoderInfoAction->setEnabled(false);
-
     m_rendererInfoAction = m_videoMenu->addAction("Renderer: OpenGL YUV");
     m_rendererInfoAction->setEnabled(false);
-
-    if (!gpu.name.isEmpty()) {
-        QAction *gpuAction = m_videoMenu->addAction("GPU: " + gpu.name);
-        gpuAction->setEnabled(false);
-    }
-
-    if (di.hardwareAccelerated) {
-        m_videoMenu->addAction("HW Accel: Yes")->setEnabled(false);
-    }
 }
 
 void MainWindow::buildSubtitleMenu()
 {
     m_subtitleMenu->clear();
-    m_subtitleMenu->addAction(LunarIcons::subtitle(), "&Load Subtitle File...", this, [this]() {
-        beforeModalDialog();
+    m_subtitleMenu->addAction("&Load Subtitle File...", this, [this]() {
         QFileDialog::getOpenFileName(this, "Load Subtitle", QString(),
             "Subtitle Files (*.srt *.ass *.ssa *.sub *.vtt);;All Files (*)");
-        afterModalDialog();
     });
     m_subtitleMenu->addSeparator();
     auto *trackMenu = m_subtitleMenu->addMenu("Subtitle &Track");
@@ -1332,7 +1341,7 @@ void MainWindow::buildSubtitleMenu()
             trackMenu->addAction(QString("Track %1").arg(i + 1));
     } else { trackMenu->addAction("No Subtitle Tracks")->setEnabled(false); }
     m_subtitleMenu->addSeparator();
-    m_enableSubtitlesAction = m_subtitleMenu->addAction(LunarIcons::subtitle(), "&Enable Subtitles");
+    m_enableSubtitlesAction = m_subtitleMenu->addAction("&Enable Subtitles");
     m_enableSubtitlesAction->setCheckable(true);
 }
 
@@ -1342,67 +1351,23 @@ void MainWindow::buildSubtitleMenu()
 
 void MainWindow::showContextMenu(const QPoint &pos)
 {
-    // Shared helper: populate a QMenu with the context menu actions
-    auto buildActions = [this](QMenu *m) {
-        QIcon playIcon(m_playing ? LunarIcons::pause() : LunarIcons::play());
-        m->addAction(playIcon, m_playing ? "Pause" : "Play", this, &MainWindow::togglePlayPause);
-        m->addSeparator();
-
-        auto *fileSub = m->addMenu(LunarIcons::open(), "File");
-        fileSub->addAction(LunarIcons::open(), "Open File...", this, &MainWindow::openFile, QKeySequence::Open);
-        fileSub->addAction(LunarIcons::open(), "Open Image Sequence...", this, &MainWindow::openImageSequence);
-        fileSub->addSeparator();
-        fileSub->addAction("Close", this, &MainWindow::closeFile, QKeySequence("Ctrl+W"));
-
-        auto *audioSub = m->addMenu(LunarIcons::volumeHigh(), "Audio");
-        audioSub->addAction(LunarIcons::volumeMute(), "Mute", this, [this]() { m_muteAction->toggle(); });
-        audioSub->addSeparator();
-        audioSub->addAction(LunarIcons::volumeHigh(), "Volume Up", this, [this]() { m_volumeSlider->setValue(qMin(100, m_volumeSlider->value() + 10)); });
-        audioSub->addAction(LunarIcons::volumeLow(), "Volume Down", this, [this]() { m_volumeSlider->setValue(qMax(0, m_volumeSlider->value() - 10)); });
-
-        auto *videoSub = m->addMenu(LunarIcons::video(), "Video");
-        videoSub->addAction(LunarIcons::fullscreen(), "Fullscreen", this, &MainWindow::toggleFullscreen, QKeySequence("F11"));
-
-        auto *subSub = m->addMenu(LunarIcons::subtitle(), "Subtitle");
-        subSub->addAction(LunarIcons::subtitle(), "Load Subtitle File...", this, [this]() {
-            beforeModalDialog();
-            QFileDialog::getOpenFileName(this, "Load Subtitle", QString(),
-                "Subtitle Files (*.srt *.ass *.ssa *.sub *.vtt);;All Files (*)");
-            afterModalDialog();
-        });
-
-        m->addSeparator();
-        if (m_isFullscreen) {
-            m->addAction(LunarIcons::fullscreenExit(), "Exit Fullscreen", this, &MainWindow::toggleFullscreen, QKeySequence("F11"));
-            m->addSeparator();
-        }
-        m->addAction("Quit", this, &QWidget::close, QKeySequence::Quit);
-    };
-
-    if (m_isFullscreen) {
-        // Fullscreen mode: use FullscreenCommandPanel (child widget, no popup)
-        if (m_fullscreenPanel) {
-            m_fullscreenPanel->closePanel();
-            m_fullscreenPanel = nullptr;
-        }
-        delete m_contextMenuContent;
-        m_contextMenuContent = new QMenu(this);
-        buildActions(m_contextMenuContent);
-
-        m_fullscreenPanel = new FullscreenCommandPanel(this);
-        m_fullscreenPanel->buildFromMenu(m_contextMenuContent);
-        m_fullscreenPanel->showAt(m_videoWidget->mapToGlobal(pos));
-        connect(m_fullscreenPanel, &FullscreenCommandPanel::closed, this, [this]() {
-            m_fullscreenPanel = nullptr;
-        });
-    } else {
-        // Windowed mode: standard Qt QMenu popup (unchanged)
-        QMenu menu(this);
-        buildActions(&menu);
-        beforeModalDialog();
-        menu.exec(m_videoWidget->mapToGlobal(pos));
-        afterModalDialog();
-    }
+    QMenu menu(this);
+    // Context menu inherits global Fluent QSS from qApp stylesheet
+    QIcon playIcon(m_playing ? LunarIcons::pause() : LunarIcons::play());
+    menu.addAction(playIcon, m_playing ? "Pause" : "Play", this, &MainWindow::togglePlayPause);
+    menu.addSeparator();
+    auto *audioSub = menu.addMenu(LunarIcons::volumeHigh(), "Audio");
+    audioSub->addAction(LunarIcons::volumeMute(), "Mute", this, [this]() { m_muteAction->toggle(); });
+    audioSub->addSeparator();
+    audioSub->addAction("Volume Up", this, [this]() { m_volumeSlider->setValue(qMin(100, m_volumeSlider->value() + 10)); });
+    audioSub->addAction("Volume Down", this, [this]() { m_volumeSlider->setValue(qMax(0, m_volumeSlider->value() - 10)); });
+    auto *videoSub = menu.addMenu(LunarIcons::video(), "Video");
+    videoSub->addAction(LunarIcons::fullscreen(), "Fullscreen", this, &MainWindow::toggleFullscreen);
+    auto *subSub = menu.addMenu(LunarIcons::subtitle(), "Subtitle");
+    subSub->addAction("Load Subtitle File...");
+    menu.addSeparator();
+    menu.addAction("Quit", this, &QWidget::close, QKeySequence::Quit);
+    menu.exec(m_videoWidget->mapToGlobal(pos));
 }
 
 // ============================================================
@@ -1431,22 +1396,18 @@ void MainWindow::closeFile()
 
 void MainWindow::openFile()
 {
-    beforeModalDialog();
     QString path = QFileDialog::getOpenFileName(this, "Open Media", QString(),
         "All Media (*.mp4 *.mov *.avi *.mkv *.webm *.m4v *.ts *.mts *.png *.jpg *.jpeg *.tif *.tiff *.dpx *.exr *.hdr *.webp *.jxl);;"
         "Video Files (*.mp4 *.mov *.avi *.mkv *.webm *.m4v *.ts *.mts);;"
         "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.dpx *.exr *.hdr *.webp *.jxl);;"
         "All Files (*)");
-    afterModalDialog();
     if (!path.isEmpty()) loadFile(path);
 }
 
 void MainWindow::openImageSequence()
 {
-    beforeModalDialog();
     QString firstFile = QFileDialog::getOpenFileName(this, "Open Image Sequence — First Frame", QString(),
         "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.dpx *.exr *.hdr *.webp *.jxl);;All Files (*)");
-    afterModalDialog();
     if (firstFile.isEmpty()) return;
 
     QFileInfo fi(firstFile);
@@ -1457,11 +1418,9 @@ void MainWindow::openImageSequence()
     static QRegularExpression seqRe(R"(^(.*?)(\d+)$)");
     QRegularExpressionMatch m = seqRe.match(base);
     if (!m.hasMatch()) {
-        beforeModalDialog();
         QMessageBox::information(this, "Image Sequence",
             "File name does not end with a frame number.\n"
             "Expected pattern like: shot_0001.png");
-        afterModalDialog();
         return;
     }
 
@@ -1492,10 +1451,8 @@ void MainWindow::openImageSequence()
     }
 
     if (count < 2) {
-        beforeModalDialog();
         QMessageBox::information(this, "Image Sequence",
             "Only one matching frame found. Need at least 2 files for a sequence.");
-        afterModalDialog();
         return;
     }
 
@@ -1507,9 +1464,7 @@ void MainWindow::openImageSequence()
     m_session.close(); m_currentFilePath = firstFile;
 
     if (!m_session.openImageSequence(pattern, startNum, count, frameRate)) {
-        beforeModalDialog();
         QMessageBox::warning(this, "Error", "Could not open image sequence:\n" + pattern);
-        afterModalDialog();
         updatePlaybackState(); updateTitle(); return;
     }
 
@@ -1525,6 +1480,10 @@ void MainWindow::openImageSequence()
     m_markers.clear();
     syncMarkersToSlider();
     buildAudioMenu(); buildVideoMenu(); buildSubtitleMenu();
+    if (m_decoderInfoAction) {
+        DecoderInfo di = m_session.decoderInfo();
+        m_decoderInfoAction->setText("Decoder: " + di.decoderName);
+    }
     // Image sequences start paused
     m_playing = false;
     updatePlaybackState();
@@ -1538,9 +1497,7 @@ void MainWindow::loadFile(const QString &path)
     if (!m_currentFilePath.isEmpty()) m_altFilePath = m_currentFilePath;
     m_session.close(); m_currentFilePath = path;
     if (!m_session.open(path)) {
-        beforeModalDialog();
         QMessageBox::warning(this, "Error", "Could not open file:\n" + path);
-        afterModalDialog();
         updatePlaybackState(); updateTitle(); return;
     }
     updateTitle(); m_seekSlider->setValue(0);
@@ -1562,6 +1519,10 @@ void MainWindow::loadFile(const QString &path)
     m_markers.clear();
     syncMarkersToSlider();
     buildAudioMenu(); buildVideoMenu(); buildSubtitleMenu();
+    if (m_decoderInfoAction) {
+        DecoderInfo di = m_session.decoderInfo();
+        m_decoderInfoAction->setText("Decoder: " + di.decoderName + (di.hardwareAccelerated && !di.gpuName.isEmpty() ? " (" + di.gpuName + ")" : ""));
+    }
     m_playing = true; updatePlaybackState(); startPlayback();
 }
 
@@ -1629,23 +1590,10 @@ void MainWindow::updatePerformanceOverlay()
     int thumbTotal = thumbHits + thumbMisses;
     double hitRate = (thumbTotal > 0) ? (100.0 * thumbHits / thumbTotal) : 0.0;
 
-    DecoderInfo di = m_session.decoderInfo();
-    GPUInfo gpu = m_session.gpuInfo();
-
     QString text;
-    text += QString("Decoder: %1\n").arg(di.decoderName);
-    text += QString("Renderer: OpenGL YUV\n");
-    if (!gpu.name.isEmpty()) {
-        text += QString("GPU: %1\n").arg(gpu.name);
-    }
-    if (di.hardwareAccelerated) {
-        text += QString("GPU Decode: %1%\n").arg(85, 0, 'f', 0);
-    }
     text += QString("Decode: %1 ms\n").arg(m_session.lastDecodeMs(), 0, 'f', 1);
     text += QString("Render: %1 ms\n").arg(stats.lastFrameMs, 0, 'f', 1);
     text += QString("FPS: %1\n").arg(stats.fps, 0, 'f', 1);
-    text += QString("CPU: %1%\n").arg(12, 0, 'f', 0);
-    text += QString("Dropped: %1\n").arg(di.droppedFrames);
     text += QString("Frame: %1\n").arg(m_currentFrameNum);
     text += QString("Thumb Hit: %1/%2 (%3%)\n").arg(thumbHits).arg(thumbTotal).arg(hitRate, 0, 'f', 0);
     text += QString("Thumb Decode: %1 ms\n").arg(m_thumbnailCache->lastBatchTimeMs(), 0, 'f', 1);
@@ -2141,7 +2089,12 @@ void MainWindow::dropEvent(QDropEvent *event)
 
 void MainWindow::showContextMenuAt(const QPoint &globalPos)
 {
-    showContextMenu(m_videoWidget->mapFromGlobal(globalPos));
+    QMenu cm;
+    for (auto *action : menuBar()->actions()) {
+        if (action->menu())
+            cm.addAction(action);
+    }
+    cm.exec(globalPos);
 }
 
 bool MainWindow::eventFilter(QObject *obj, QEvent *event)
@@ -2303,9 +2256,7 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event)
         // Popup open upward from label
         QPoint pos = m_speedLabel->mapToGlobal(QPoint(0, 0));
         pos.ry() -= m_speedMenu->sizeHint().height();
-        beforeModalDialog();
         m_speedMenu->exec(pos);
-        afterModalDialog();
         return true;
     }
 
@@ -2314,18 +2265,6 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event)
 
 bool MainWindow::event(QEvent *e)
 {
-    // Window deactivate — skip reposition during focus loss
-    if (e->type() == QEvent::WindowDeactivate && m_isFullscreen) {
-        m_skipReposition = true;
-    }
-
-    // Window activate — reposition overlay
-    if (e->type() == QEvent::WindowActivate && m_isFullscreen && m_fsOverlay) {
-        m_skipReposition = false;
-        positionControls();
-        m_fsOverlay->update();
-    }
-
     // Window activate — restore preview after Alt-Tab / screenshot / focus loss
     if (e->type() == QEvent::WindowActivate && m_hoverActive && m_session.isOpen()) {
         QCursor cursor;

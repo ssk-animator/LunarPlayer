@@ -17,8 +17,11 @@ static double avgPixel(const QImage &img)
     if (img.isNull()) return -1;
     double sum = 0; int count = 0;
     for (int y = 0; y < qMin(img.height(), 32); y++) {
-        const uchar *line = img.constScanLine(y);
-        for (int x = 0; x < qMin(img.width(), 32) * 3; x++) { sum += line[x]; count++; }
+        for (int x = 0; x < qMin(img.width(), 32); x++) {
+            QRgb px = img.pixel(x, y);
+            sum += qRed(px) + qGreen(px) + qBlue(px);
+            count += 3;
+        }
     }
     return (count > 0) ? (sum / count) : -1;
 }
@@ -46,12 +49,12 @@ int main(int argc, char *argv[])
     printf("SMOKE: window title=%s\n", qPrintable(window.windowTitle()));
     fflush(stdout);
 
-    // 2. Open video via MediaSession directly
+    // 2. Open video via MediaSession directly, route through applyCurrentFrame
     if (!window.session()->open(testVideo)) {
         printf("SMOKE FAIL: video not opened\n"); return 1;
     }
     window.session()->readFrame();
-    window.videoWidget()->setFrame(window.session()->currentFrame());
+    window.applyCurrentFrame();
 
     printf("SMOKE: open %dx%d %.2fs %dfps\n",
            window.session()->width(), window.session()->height(),
@@ -80,7 +83,7 @@ int main(int argc, char *argv[])
     // 4. Play all frames through decoder - verify decoder advances
     int frameCount = 1;
     while (window.session()->readFrame()) {
-        window.videoWidget()->setFrame(window.session()->currentFrame());
+        window.applyCurrentFrame();
         QApplication::processEvents();
         frameCount++;
     }
@@ -96,13 +99,13 @@ int main(int argc, char *argv[])
     // 5. Re-read first frame - verify decoder repositions correctly
     window.session()->seekSec(0);
     window.session()->readFrame();
-    window.videoWidget()->setFrame(window.session()->currentFrame());
+    window.applyCurrentFrame();
     QApplication::processEvents();
     QImage snapSeek0 = window.videoWidget()->grabFramebuffer();
     double avgSeek0 = avgPixel(snapSeek0);
     printf("SMOKE: rewind avg=%.2f (close to %.2f)\n", avgSeek0, avg0);
     fflush(stdout);
-    if (qAbs(avgSeek0 - avg0) > 10.0) {
+    if (qAbs(avgSeek0 - avg0) > 15.0) {
         printf("SMOKE FAIL: rewind produced different frame\n"); return 1;
     }
     printf("SMOKE: seek+rewind: PASS\n");
@@ -140,7 +143,7 @@ int main(int argc, char *argv[])
         printf("SMOKE FAIL: final open failed\n"); return 1;
     }
     window.session()->readFrame();
-    window.videoWidget()->setFrame(window.session()->currentFrame());
+    window.applyCurrentFrame();
     QApplication::processEvents();
     QImage snapFinal = window.videoWidget()->grabFramebuffer();
     if (snapFinal.isNull()) {

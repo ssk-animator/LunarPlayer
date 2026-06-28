@@ -1,0 +1,18 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file>play.svg</file>
+        <file>pause.svg</file>
+        <file>frame_next.svg</file>
+        <file>frame_prev.svg</file>
+        <file>volume_high.svg</file>
+        <file>volume_low.svg</file>
+        <file>volume_mute.svg</file>
+        <file>fullscreen.svg</file>
+        <file>fullscreen_exit.svg</file>
+        <file>audio.svg</file>
+        <file>video.svg</file>
+        <file>subtitle.svg</file>
+        <file>settings.svg</file>
+        <file>open.svg</file>
+    </qresource>
+</RCC>

@@ -6,7 +6,6 @@
 #include "MediaInfo.h"
 #include "decoder/DecoderInfo.h"
 #include "decoder/HWAccel.h"
-#include "decoder/DecoderManager.h"
 #include <QPushButton>
 #include <QLabel>
 #include <QTimer>
@@ -24,8 +23,6 @@ class AudioDecoder;
 class AudioOutput;
 class ThumbnailCache;
 class HoverPreviewWidget;
-class GradientOverlay;
-class FullscreenCommandPanel;
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -87,7 +84,6 @@ public:
     DecoderInfo decoderInfo() const { return m_decoderInfo; }
     MediaInfo mediaInfo() const;
     double lastDecodeMs() const { return m_lastDecodeMs; }
-    const GPUInfo& gpuInfo() const { return m_gpuInfo; }
 
 private:
     AVFormatContext *m_fmtCtx = nullptr;
@@ -113,7 +109,6 @@ private:
     AVBufferRef *m_hwDeviceCtx = nullptr;
     AVPixelFormat m_hwPixFmt = AV_PIX_FMT_NONE;
     DecoderInfo m_decoderInfo;
-    GPUInfo m_gpuInfo;
 
     QElapsedTimer m_decodePerfTimer;
     double m_lastDecodeMs = 0.0;
@@ -191,14 +186,6 @@ private:
     void stepAndResume(int direction);
     void showContextMenuAt(const QPoint &globalPos);
 
-    // Temporarily drop/reacquire HWND_TOPMOST so that modal dialogs
-    // appear *above* the fullscreen borderless window instead of behind it.
-    void beforeModalDialog();
-    void afterModalDialog();
-
-    FullscreenCommandPanel *m_fullscreenPanel  = nullptr;
-    QMenu                 *m_contextMenuContent = nullptr;
-
     void addMarker();
     void removeNearestMarker();
     void seekNextMarker();
@@ -231,7 +218,7 @@ public:
     QSlider *m_volumeSlider = nullptr;
 
     // Fullscreen overlay
-    GradientOverlay *m_fsOverlay = nullptr;
+    QWidget *m_fsOverlay = nullptr;
     QPushButton *m_fsPlayBtn = nullptr;
     SeekSlider *m_fsSeekBar = nullptr;
     QPushButton *m_fsFullscreenBtn = nullptr;
@@ -266,14 +253,9 @@ public:
 
     // Fullscreen
     bool m_isFullscreen = false;
-    int  m_dialogDepth  = 0;   // >0 when a modal dialog is showing
     bool m_showPerformance = false;
     bool m_controlsVisible = false;
-    bool m_skipReposition = false;
     QTimer *m_fullscreenHideTimer = nullptr;
-    QByteArray m_savedWindowGeometry;
-    long m_savedWindowStyle = 0;
-    long m_savedWindowExStyle = 0;
 
     // Frame markers
     QVector<double> m_markers;
