@@ -1061,6 +1061,8 @@ MainWindow::MainWindow(QWidget *parent)
     setMinimumSize(640, 480);
     resize(1280, 720);
 
+    setWindowIcon(QIcon(":/app/LunarPlayer.png"));
+
     m_thumbnailCache = new ThumbnailCache(this);
     m_hoverPreview = new HoverPreviewWidget(this);
     m_sequenceCache = new SequenceFrameCache(this);
@@ -2074,9 +2076,54 @@ void MainWindow::setupMenus()
     helpMenu->addSeparator();
     helpMenu->addAction("&About Lunar Player", this, [this]() {
         beforeModalDialog();
-        QMessageBox::about(this, "About Lunar Player",
-            "Lunar Player " + QCoreApplication::applicationVersion() +
-            "\n\nA modern media player for animation, VFX, and editorial review.");
+        QDialog dlg(this);
+        dlg.setWindowTitle("About Lunar Player");
+        dlg.setFixedSize(420, 360);
+        dlg.setWindowIcon(QIcon(":/app/LunarPlayer.png"));
+
+        auto *layout = new QVBoxLayout(&dlg);
+        layout->setAlignment(Qt::AlignCenter);
+        layout->setSpacing(8);
+
+        auto *logoLabel = new QLabel;
+        logoLabel->setPixmap(QIcon(":/app/LunarPlayer.png").pixmap(128, 128));
+        logoLabel->setAlignment(Qt::AlignCenter);
+        layout->addWidget(logoLabel);
+
+        auto *titleLabel = new QLabel("<h2 style='margin:0;'>Lunar Player</h2>");
+        titleLabel->setAlignment(Qt::AlignCenter);
+        layout->addWidget(titleLabel);
+
+        auto *versionLabel = new QLabel("Version " + QCoreApplication::applicationVersion());
+        versionLabel->setAlignment(Qt::AlignCenter);
+        versionLabel->setStyleSheet("color: gray;");
+        layout->addWidget(versionLabel);
+
+        layout->addSpacing(4);
+
+        auto *descLabel = new QLabel("A modern media player for animation,\nVFX, and editorial review.");
+        descLabel->setAlignment(Qt::AlignCenter);
+        layout->addWidget(descLabel);
+
+        layout->addSpacing(8);
+
+        auto *copyLabel = new QLabel("Copyright (C) SSK");
+        copyLabel->setAlignment(Qt::AlignCenter);
+        copyLabel->setStyleSheet("color: gray; font-size: small;");
+        layout->addWidget(copyLabel);
+
+        layout->addStretch();
+
+        auto *okBtn = new QPushButton("OK");
+        okBtn->setDefault(true);
+        connect(okBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+        auto *btnLayout = new QHBoxLayout;
+        btnLayout->addStretch();
+        btnLayout->addWidget(okBtn);
+        btnLayout->addStretch();
+        layout->addLayout(btnLayout);
+
+        dlg.exec();
         afterModalDialog();
     });
     helpMenu->addAction("&Keyboard Shortcuts", this, [this]() {

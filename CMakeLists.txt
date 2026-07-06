@@ -245,6 +245,8 @@ add_executable(LunarPlayer WIN32
     src/update/UpdateDialog.h
     src/update/UpdateDialog.cpp
     icons/icons.qrc
+    assets/resource.rc
+    assets/app.manifest
 )
 
 target_include_directories(LunarPlayer PRIVATE src "${FFMPEG_DIR}/include" third_party/miniz)

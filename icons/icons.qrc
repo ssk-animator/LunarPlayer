@@ -15,4 +15,8 @@
         <file>settings.svg</file>
         <file>open.svg</file>
     </qresource>
+    <qresource prefix="/app">
+        <file alias="LunarPlayer.png">../assets/LunarPlayer.png</file>
+        <file alias="LunarPlayer.ico">../assets/LunarPlayer.ico</file>
+    </qresource>
 </RCC>
