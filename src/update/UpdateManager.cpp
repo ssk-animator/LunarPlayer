@@ -9,7 +9,7 @@
 
 UpdateManager::UpdateManager(QObject *parent)
     : QObject(parent),
-      m_provider(new GitHubUpdateProvider("ssk90", "LunarPlayer", {}, this)),
+      m_provider(new GitHubUpdateProvider("ssk-animator", "LunarPlayer", {}, this)),
       m_downloadManager(new DownloadManager(this)),
       m_verifier(new PackageVerifier(this)),
       m_installer(new UpdateInstaller(this))
@@ -86,7 +86,7 @@ void UpdateManager::checkForUpdateAsync()
     fflush(stderr);
 
     QString apiBase = m_overrideUrl.isEmpty()
-        ? QString("https://api.github.com/repos/ssk90/LunarPlayer/releases/latest")
+        ? QString("https://api.github.com/repos/ssk-animator/LunarPlayer/releases/latest")
         : m_overrideUrl;
     QNetworkRequest req{QUrl(apiBase)};
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");

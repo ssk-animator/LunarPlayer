@@ -6,7 +6,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     app.setApplicationName("Lunar Player");
     app.setOrganizationName("LunarPlayer");
-    app.setApplicationVersion("0.1.0");
+    app.setApplicationVersion("0.1.0-alpha");
 
     MainWindow window;
     window.show();
