@@ -206,6 +206,30 @@ public:
         return QIcon(pm);
     }
 
+    static QIcon image() {
+        QPixmap pm(20, 20);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(QPen(Qt::white, 1.5));
+        p.setBrush(Qt::NoBrush);
+        p.drawRoundedRect(2, 3, 16, 14, 2, 2);
+        // Sun
+        p.drawEllipse(QRect(5, 6, 4, 4));
+        // Mountain
+        QPainterPath mtn;
+        mtn.moveTo(2, 17);
+        mtn.lineTo(7, 9);
+        mtn.lineTo(12, 17);
+        p.drawPath(mtn);
+        QPainterPath mtn2;
+        mtn2.moveTo(10, 17);
+        mtn2.lineTo(14, 8);
+        mtn2.lineTo(18, 17);
+        p.drawPath(mtn2);
+        return QIcon(pm);
+    }
+
     static QIcon subtitle() {
         QPixmap pm(20, 20);
         pm.fill(Qt::transparent);

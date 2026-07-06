@@ -7,6 +7,7 @@
 #include <QStyleOptionSlider>
 #include <QPainter>
 #include <QVector>
+#include <cstdio>
 
 class SeekSlider : public QSlider {
 public:
@@ -37,6 +38,8 @@ protected:
             QRect handleRect = style()->subControlRect(
                 QStyle::CC_Slider, &opt, QStyle::SC_SliderHandle, this);
             if (handleRect.contains(event->pos())) {
+                fprintf(stderr, "[SLIDER] mousePress: handle click val=%d\n", value());
+                fflush(stderr);
                 QSlider::mousePressEvent(event);
                 return;
             }
@@ -49,6 +52,8 @@ protected:
                 grooveRect.width());
             newVal = qBound(minimum(), newVal, maximum());
 
+            fprintf(stderr, "[SLIDER] mousePress: groove click val=%d->%d\n", value(), newVal);
+            fflush(stderr);
             setValue(newVal);
             QAbstractSlider::setSliderDown(true);
             emit sliderMoved(newVal);

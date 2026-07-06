@@ -36,6 +36,14 @@ DecoderSelection DecoderManager::selectDecoder(const DecoderConfig &config)
                   return a.score.totalScore > b.score.totalScore;
               });
 
+    // HW decode enabled: CUDA/NVDEC for HEVC HDR10 (P010 output).
+    // Works in synchronous decode path where CUDA + GL run on same thread.
+    for (const auto &candidate : candidates) {
+        qDebug() << "DecoderManager: HW candidate:" << candidate.name
+                 << "score =" << candidate.score.totalScore;
+    }
+    // Don't clear — let HW candidates be tried below
+
     for (const auto &candidate : candidates) {
         QElapsedTimer timer;
         timer.start();
@@ -55,8 +63,6 @@ DecoderSelection DecoderManager::selectDecoder(const DecoderConfig &config)
 
         const AVCodec *hwCodec = avcodec_find_decoder_by_name(nameStr);
         if (!hwCodec) {
-            qWarning() << "DecoderManager:" << candidate.name
-                       << "- decoder" << nameStr << "not found";
             av_buffer_unref(&hwCtx);
             continue;
         }
@@ -71,6 +77,15 @@ DecoderSelection DecoderManager::selectDecoder(const DecoderConfig &config)
             avcodec_parameters_to_context(hwCtx2, config.codecpar);
         }
         hwCtx2->hw_device_ctx = av_buffer_ref(hwCtx);
+
+        if (candidate.hwType == AV_HWDEVICE_TYPE_CUDA) {
+            hwCtx2->get_format = [](AVCodecContext *ctx, const AVPixelFormat *fmt) -> AVPixelFormat {
+                for (int i = 0; fmt[i] != AV_PIX_FMT_NONE; i++) {
+                    if (fmt[i] == AV_PIX_FMT_CUDA) return fmt[i];
+                }
+                return fmt[0];
+            };
+        }
 
         int ret = avcodec_open2(hwCtx2, hwCodec, nullptr);
         if (ret < 0) {
@@ -105,15 +120,15 @@ DecoderSelection DecoderManager::selectDecoder(const DecoderConfig &config)
         return result;
     }
 
-    qDebug() << "DecoderManager: no HW decoder available, falling back to Software";
-
     const AVCodec *swCodec = avcodec_find_decoder(config.codecId);
-    if (!swCodec)
+    if (!swCodec) {
         return result;
+    }
 
     AVCodecContext *swCtx = avcodec_alloc_context3(swCodec);
-    if (!swCtx)
+    if (!swCtx) {
         return result;
+    }
 
     if (config.codecpar)
         avcodec_parameters_to_context(swCtx, config.codecpar);

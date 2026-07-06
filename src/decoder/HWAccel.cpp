@@ -142,9 +142,9 @@ const char* hwDecoderName(AVCodecID codecId, AVHWDeviceType hwType)
         }
     case AV_CODEC_ID_HEVC:
         switch (hwType) {
-        case AV_HWDEVICE_TYPE_D3D11VA: return "hevc_d3d11va";
+        case AV_HWDEVICE_TYPE_D3D11VA: return "hevc_d3d11va2";
         case AV_HWDEVICE_TYPE_DXVA2:   return "hevc_dxva2";
-        case AV_HWDEVICE_TYPE_CUDA:    return "hevc_cuviddec";
+        case AV_HWDEVICE_TYPE_CUDA:    return "hevc_cuvid";
         case AV_HWDEVICE_TYPE_QSV:     return "hevc_qsv";
         case AV_HWDEVICE_TYPE_AMF:     return "hevc_amf";
         default: return nullptr;
@@ -184,24 +184,30 @@ DecoderScore scoreDecoder(const GPUInfo &gpu, AVHWDeviceType type,
                           AVCodecID codecId, int width, int height, int64_t bitrate)
 {
     DecoderScore s;
+    QString typeName = QString::number(type);
 
-    if (!isCodecSupportedHW(codecId, type))
+    if (!isCodecSupportedHW(codecId, type)) {
         return s;
+    }
 
     s.gpuSupported = 25;
     s.codecSupported = 25;
 
     const char *name = hwDecoderName(codecId, type);
-    if (!name)
+    if (!name) {
         return s;
+    }
 
     const AVCodec *hwCodec = avcodec_find_decoder_by_name(name);
-    if (!hwCodec)
+    if (!hwCodec) {
         return s;
+    }
 
     AVBufferRef *hwCtx = nullptr;
-    if (av_hwdevice_ctx_create(&hwCtx, type, nullptr, nullptr, 0) < 0)
+    int devRet = av_hwdevice_ctx_create(&hwCtx, type, nullptr, nullptr, 0);
+    if (devRet < 0) {
         return s;
+    }
 
     AVCodecContext *testCtx = avcodec_alloc_context3(hwCodec);
     if (!testCtx) {
@@ -216,9 +222,9 @@ DecoderScore scoreDecoder(const GPUInfo &gpu, AVHWDeviceType type,
 
     int ret = avcodec_open2(testCtx, hwCodec, nullptr);
     if (ret < 0) {
-        s.initPenalty = -30;
         char errBuf[256];
         av_strerror(ret, errBuf, sizeof(errBuf));
+        s.initPenalty = -30;
         s.reasons << QString("Init failed: %1").arg(errBuf);
     } else {
         s.driverAvailable = 25;

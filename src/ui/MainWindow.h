@@ -7,25 +7,57 @@
 #include "decoder/DecoderInfo.h"
 #include "decoder/HWAccel.h"
 #include "decoder/DecoderManager.h"
+#include "renderer/ColorManager.h"
 #include <QPushButton>
 #include <QLabel>
 #include <QTimer>
 #include <QMenu>
 #include <QActionGroup>
+#include <mutex>
 #include <QGraphicsOpacityEffect>
 #include <QPropertyAnimation>
 #include <QContextMenuEvent>
 #include <QElapsedTimer>
 #include <queue>
 #include <atomic>
+#include "VideoWidget.h"
+
+// ---- Command types for Action Controller pattern ----
+enum class VideoCmd { Zoom, AspectRatio, Crop, Fullscreen, VideoTrack };
+enum class AudioCmd { Mute, VolumeChange, AudioTrack, StereoMode };
+enum class SubtitleCmd { Enable, LoadFile, Track, Delay };
+
+struct VideoCommand {
+    VideoCmd type;
+    QVariant value;
+};
+struct AudioCommand {
+    AudioCmd type;
+    QVariant value;
+};
+struct SubtitleCommand {
+    SubtitleCmd type;
+    QVariant value;
+};
 
 class VideoWidget;
 class AudioDecoder;
 class AudioOutput;
+class AudioEngine;
 class ThumbnailCache;
 class HoverPreviewWidget;
 class GradientOverlay;
 class FullscreenCommandPanel;
+class SequenceFrameCache;
+class CompareController;
+class SubtitleManager;
+class CompareWidget;
+class NetworkMediaSession;
+class NetworkBuffer;
+class StreamingOverlay;
+class DecodeThread;
+class UpdateManager;
+class UpdateDialog;
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -33,7 +65,15 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
+#include <libavutil/mathematics.h>
 }
+
+// ---- Frame queue for PTS-based presentation scheduling ----
+struct QueuedFrame {
+    AVFrame *frame = nullptr;
+    double ptsSec = 0.0;
+    int64_t frameNum = -1;
+};
 
 struct SequenceInfo {
     bool isValid = false;
@@ -53,6 +93,7 @@ public:
     bool openImageSequence(const QString &pattern, int startNum, int frameCount, int frameRate);
     void close();
     bool readFrame();
+    void setSkipRGBConversion(bool skip) { m_skipRGBConversion = skip; }
     QImage currentFrame() const { return m_frame; }
     AVFrame* decodedFrame() const { return m_decodedFrame; }
     AVFrame* displayFrame() const;
@@ -79,6 +120,7 @@ public:
     bool hasAudio() const { return m_audioStreamIdx >= 0; }
     bool popAudioPacket(AVPacket **pkt);
     void flushAudioQueue();
+    size_t audioQueueSize();
     AVFormatContext* formatContext() const { return m_fmtCtx; }
 
     int audioStreamCount() const { return m_audioStreamCount; }
@@ -86,8 +128,28 @@ public:
     int videoStreamCount() const { return m_videoStreamCount; }
     DecoderInfo decoderInfo() const { return m_decoderInfo; }
     MediaInfo mediaInfo() const;
+    HDRMetadata hdrMetadata() const;
     double lastDecodeMs() const { return m_lastDecodeMs; }
+    double lastSwsScaleMs() const { return m_lastSwsScaleMs; }
     const GPUInfo& gpuInfo() const { return m_gpuInfo; }
+    QString lastError() const { return m_lastError; }
+
+    // Decode state for EOF flush
+    enum class DecodeState { Reading, Flushing, Finished };
+    DecodeState decodeState() const { return m_decodeState; }
+
+    // ---- Frame queue API ----
+    bool decodeNextFrame();              // decode one frame into queue, return false on EOF/error
+    bool hasDisplayableFrame(double ptsSec) const;  // is there a frame with pts <= ptsSec?
+    bool popDisplayFrame(QueuedFrame &out, double ptsSec);  // pop frame with pts <= ptsSec, drop late ones
+    bool peekDisplayFrame(QueuedFrame &out) const;  // peek front of queue without removing
+    int frameQueueSize() const { return static_cast<int>(m_frameQueue.size()); }
+    double nextFramePtsSec() const;      // PTS of head frame, or -1 if empty
+    void flushFrameQueue();              // clear queue (on seek/close)
+    void setFrameQueueMax(int n) { m_frameQueueMax = n; }
+
+    // Current decoded PTS (seconds) — for position tracking
+    double lastDecodedPtsSec() const { return m_lastDecodedPtsSec; }
 
 private:
     AVFormatContext *m_fmtCtx = nullptr;
@@ -106,6 +168,7 @@ private:
     AVPacket *m_pkt = nullptr;
     AVFrame *m_decodedFrame = nullptr;
     std::queue<AVPacket*> m_audioPacketQueue;
+    std::mutex m_audioPacketMutex;
     int m_audioStreamCount = 0;
     int m_subtitleStreamCount = 0;
     int m_videoStreamCount = 0;
@@ -117,6 +180,7 @@ private:
 
     QElapsedTimer m_decodePerfTimer;
     double m_lastDecodeMs = 0.0;
+    double m_lastSwsScaleMs = 0.0;
 
     QString m_codecName;
     QString m_codecLongName;
@@ -126,11 +190,42 @@ private:
     QString m_hdrType;
     int64_t m_bitrate = 0;
     QString m_audioCodecName;
+    QString m_audioCodecLongName;
+    QString m_audioChannelLayout;
+    QString m_audioSampleFormat;
+    int m_audioBitDepth = 0;
+    int64_t m_audioBitrate = 0;
+    QString m_audioProfile;
+    int m_audioFrameSize = 0;
+    int m_audioBlockAlign = 0;
     QString m_rendererName;
+    QString m_containerFormat;
+    QString m_containerLongName;
 
     SwsContext *m_convertCtx = nullptr;
     AVFrame *m_convertedFrame = nullptr;
     bool m_isImageSequence = false;
+    QString m_lastError;
+
+    // Decode state + counters
+    DecodeState m_decodeState = DecodeState::Reading;
+    int64_t m_totalFramesDecoded = 0;
+    int m_packetsSkipped = 0;
+    int m_framesDropped = 0;
+    int m_seeksCount = 0;
+    double m_seekLatencyMs = 0.0;
+    double m_totalDecodeMs = 0.0;
+    double m_peakDecodeMs = 0.0;
+    QElapsedTimer m_seekTimer;
+    bool m_skipRGBConversion = false;
+
+    // ---- Frame queue for PTS-based scheduling ----
+    std::deque<QueuedFrame> m_frameQueue;
+    int m_frameQueueMax = 4;
+    double m_lastDecodedPtsSec = 0.0;
+
+    // Internal: decode one raw packet into m_decodedFrame
+    bool decodeOnePacket();
 };
 
 class MainWindow : public QMainWindow {
@@ -150,15 +245,34 @@ protected:
     bool event(QEvent *e) override;
 
 public:
+    // Playback mode
+    enum class PlayMode { Normal, Compare };
+    PlayMode playMode() const { return m_playMode; }
+
     void loadFile(const QString &path);
+    void loadImageFile(const QString &path);
     void closeFile();
+
+    // Sequence auto-detection mode for the session
+    enum class SeqMode { Ask, Single, Sequence };
+    void setSeqMode(SeqMode m) { m_seqMode = m; }
+    SeqMode seqMode() const { return m_seqMode; }
     MediaSession* session() { return &m_session; }
+    MediaSession* sessionB() { return &m_sessionB; }
     VideoWidget* videoWidget() { return m_videoWidget; }
     double durationSec() const { return m_session.durationSec(); }
 
+    // Format filter helpers — built from FFmpeg's demuxer list (public for testing)
+    static QStringList buildMediaFilters();
+    static QStringList buildNavFilters();
+    static void initMediaFilters();
+
 private slots:
     void openFile();
+    void openImage();
     void openImageSequence();
+    void openCompare();
+    void exitCompareMode();
     void togglePlayPause();
     void toggleFullscreen();
     QString currentFilePath() const { return m_currentFilePath; }
@@ -166,6 +280,15 @@ private slots:
     void seekBySliderPressed();
     void seekBySliderReleased();
     void updateTimerTick();
+    void onZoomChanged(QAction *action);
+    void onAspectChanged(QAction *action);
+    void onCropChanged(QAction *action);
+
+    // ---- Action Controller: shared business logic ----
+    void executeVideoCommand(const VideoCommand &cmd);
+    void executeAudioCommand(const AudioCommand &cmd);
+    void executeSubtitleCommand(const SubtitleCommand &cmd);
+    void loadSubtitleFile();
 
 private:
     void setupUI();
@@ -188,8 +311,35 @@ private:
     void updateStatusBarForSequence();
     void syncSeekUI();
     void seekAndResume(double newPos);
+    void runSeekStressTest();
+    void runTimelineStressTest();
     void stepAndResume(int direction);
     void showContextMenuAt(const QPoint &globalPos);
+
+    // ---- Update system ----
+    void checkForUpdates();
+    void showReleaseNotes();
+    void showUpdateSettings();
+    void onStartupUpdateCheck();
+
+    // ---- Helper builders (shared by menu bar + context menu) ----
+    void addZoomAction(QMenu *menu, const char *label, double factor, bool checked, QActionGroup *group);
+    void addAspectAction(QMenu *menu, const char *label, VideoWidget::AspectMode mode, bool checked, QActionGroup *group);
+    void addCropAction(QMenu *menu, const char *label, VideoWidget::CropMode mode, bool checked, QActionGroup *group);
+    void buildZoomSubmenu(QMenu *parent, QActionGroup *group);
+    void buildAspectSubmenu(QMenu *parent, QActionGroup *group);
+    void buildCropSubmenu(QMenu *parent, QActionGroup *group);
+    void buildAudioTrackSubmenu(QMenu *parent, QActionGroup *group);
+    void buildStereoModeSubmenu(QMenu *parent, QActionGroup *group);
+    void buildSubtitleTrackSubmenu(QMenu *parent, QActionGroup *group);
+
+    // ---- Targeted UI sync (only updates what changed) ----
+    void syncZoomCheckmarks();
+    void syncAspectCheckmarks();
+    void syncCropCheckmarks();
+    void syncAudioTrackCheckmarks();
+    void syncMuteState();
+    void syncSubtitlesEnabled();
 
     // Temporarily drop/reacquire HWND_TOPMOST so that modal dialogs
     // appear *above* the fullscreen borderless window instead of behind it.
@@ -204,6 +354,15 @@ private:
     void seekNextMarker();
     void seekPrevMarker();
     void syncMarkersToSlider();
+
+    // Compare mode
+    void enterCompareMode();
+    void compareApplyBothFrames();
+
+    // Prompt user when a numbered image file might be a sequence
+    void promptSequenceChoice(const QString &firstFile);
+    bool detectSequenceCandidate(const QString &path, QString &prefix,
+                                  int &startNum, int &padding, QString &ext);
 
     QString buttonStyle() const;
     QString sliderStyle() const;
@@ -241,9 +400,19 @@ public:
     QPropertyAnimation *m_overlayAnim = nullptr;
 
     MediaSession m_session;
+    MediaSession m_sessionB;     // second session for compare mode
+    DecodeThread *m_decodeThread = nullptr;
+    bool m_usingDecodeThread = false;
     AudioDecoder *m_audioDecoder = nullptr;
     AudioOutput *m_audioOutput = nullptr;
+    AudioEngine *m_audioEngine = nullptr;
     ThumbnailCache *m_thumbnailCache = nullptr;
+    SequenceFrameCache *m_sequenceCache = nullptr;
+    SeqMode m_seqMode = SeqMode::Ask;
+    CompareController *m_compareCtrl = nullptr;
+    CompareWidget *m_compareWidget = nullptr;
+    PlayMode m_playMode = PlayMode::Normal;
+    int m_activeCompareAudio = 0; // 0=A, 1=B
     HoverPreviewWidget *m_hoverPreview = nullptr;
     QTimer *m_updateTimer = nullptr;
     QTimer *m_decodeTimer = nullptr;
@@ -259,10 +428,25 @@ public:
     double m_currentPosSec = 0.0;
     int m_currentFrameNum = 0;
 
+    // ---- Timeline reliability: atomic seek guard + coalesced drag ----
+    std::atomic<bool> m_seekInProgress{false};
+    std::atomic<int>  m_seekSeq{0};
+    int  m_latestSliderValue = 0;
+    QTimer *m_dragCoalesceTimer = nullptr;
+    static constexpr int DRAG_COALESCE_MS = 16;  // ~60Hz seek during drag
+
     int m_playDirection = 1;
     double m_speed = 1.0;
     int m_loopIn = -1;
     int m_loopOut = -1;
+
+    // ---- PTS-driven playback clock ----
+    QElapsedTimer m_playbackClock;
+    double m_playbackBasePtsSec = 0.0;   // PTS (seconds) at playback start/seek
+    double m_playbackClockBase = 0.0;    // wall clock (seconds) at playback start/seek
+    double playbackNowSec() const;       // current playback position from wall clock
+    void syncPlaybackClock(double ptsSec); // hard reset clock to given PTS (seek/start only)
+    void adjustPlaybackClock(double ptsSec); // smooth nudge toward frame PTS (max 1 frame/step)
 
     // Fullscreen
     bool m_isFullscreen = false;
@@ -292,6 +476,15 @@ public:
     double m_lastHoverHandlerMs = 0.0;
     double m_peakHoverHandlerMs = 0.0;
 
+    // Subtitle management
+    std::unique_ptr<SubtitleManager> m_subtitleManager;
+
+    // Streaming support
+    std::unique_ptr<NetworkMediaSession> m_networkSession;
+    StreamingOverlay *m_streamingOverlay = nullptr;
+    QAction *m_toggleStreamingOverlayAction = nullptr;
+    bool m_isNetworkStream = false;
+
     // Menus
     QMenu *m_audioMenu = nullptr;
     QActionGroup *m_audioTrackGroup = nullptr;
@@ -301,11 +494,36 @@ public:
     QMenu *m_videoMenu = nullptr;
     QActionGroup *m_zoomGroup = nullptr;
     QActionGroup *m_aspectGroup = nullptr;
+    QActionGroup *m_cropGroup = nullptr;
     QAction *m_decoderInfoAction = nullptr;
     QAction *m_rendererInfoAction = nullptr;
 
+    void loadSettings();
+    void saveSettings();
+
     QMenu *m_subtitleMenu = nullptr;
     QAction *m_enableSubtitlesAction = nullptr;
+
+    // Pipeline profiling
+    QElapsedTimer m_pipelineTimer;
+
+    // ---- Update system ----
+    UpdateManager *m_updateManager = nullptr;
+    QTimer *m_startupUpdateTimer = nullptr;
+    int m_profFrameCount = 0;
+    double m_profTotalMs = 0.0;
+    double m_profPeakTotalMs = 0.0;
+    double m_profReadMs = 0.0;
+    double m_profDecodeMs = 0.0;
+    double m_profConvertMs = 0.0;
+    double m_profUploadMs = 0.0;
+    double m_profPaintMs = 0.0;
+    double m_profPeakReadMs = 0.0;
+    double m_profPeakDecodeMs = 0.0;
+    double m_profPeakConvertMs = 0.0;
+    double m_profPeakUploadMs = 0.0;
+    double m_profPeakPaintMs = 0.0;
+    int m_profCount = 0;
 };
 
 #endif

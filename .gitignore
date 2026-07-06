@@ -1,5 +1,10 @@
-# Build
+# Build directories
 build/
+build_audio/
+build_x64/
+cmake-build-*/
+
+# Compiled output
 *.exe
 *.lib
 *.dll
@@ -9,6 +14,8 @@ build/
 *.obj
 *.o
 *.a
+
+# MOC / UIC / RCC generated
 moc_*
 ui_*
 qrc_*
@@ -33,6 +40,20 @@ CMakeLists.txt.user*
 Thumbs.db
 .DS_Store
 
+# Backup directory
+backups/
+
+# Test output
+test-results/
+*_rendered_output.png
+smoke_*.txt
+build_log*.txt
+smoke_output.txt
+smoke_error.txt
+
+# Diagnostic output
+diag_*.txt
+
 # Evidence output (user-generated, not source)
 Phase1_Acceptance_Evidence/
 build/manual_qa_evidence/
@@ -41,18 +62,20 @@ build/acceptance_report/
 # Temp
 *.tmp
 
-# Generated test output
-*_rendered_output.png
-smoke_*.txt
-build_log*.txt
-smoke_output.txt
-smoke_error.txt
-
 # FFmpeg binaries (too large for git - download separately)
-third_party/*.exe
 third_party/bin/
 third_party/doc/
 third_party/lib/*.lib
 third_party/lib/*.dll.a
 third_party/_tmp/
 third_party/presets/
+third_party/*.exe
+
+# Test media (too large for git - download separately)
+tests/media/
+
+# Plugins (built separately)
+plugins/
+
+# E2E test temp data
+AppData/
