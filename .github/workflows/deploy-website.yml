@@ -1,0 +1,43 @@
+# Deploy Lunar Player website to GitHub Pages
+#
+# The site is pure static HTML/CSS/JS (no build step), so this workflow
+# uploads Website/ directly as the Pages artifact.
+# Served at: https://ssk-animator.github.io/LunarPlayer/
+# All asset references in the site are relative, so the /LunarPlayer subpath
+# resolves without extra configuration.
+
+name: Deploy website to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "Website/**"
+      - ".github/workflows/deploy-website.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Upload website artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: Website
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
