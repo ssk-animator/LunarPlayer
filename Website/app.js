@@ -234,9 +234,8 @@ addEventListener("keydown", (e) => {
   if (e.key === "ArrowLeft") openLb(lbIdx - 1);
 });
 
-/* download placeholder — honest, no fake links */
-$("#downloadBtn").addEventListener("click", () => {
-  $("#downloadNote").textContent = "v0.1.0-alpha is in active development. Stable installers will be published here and on GitHub Releases.";
-  showToast("No public installer yet — watch GitHub Releases for v0.1.0-alpha.");
-});
+/* download CTAs point at the real GitHub Release asset — toast only, never block the native download */
+$$(".js-download").forEach((a) => a.addEventListener("click", () => {
+  showToast("Downloading Lunar Player Installer (v0.1.0-alpha)…");
+}));
 })();
