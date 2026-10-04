@@ -1,0 +1,5 @@
+#pragma once
+// Generated single version source for the installer tree (CMake
+// project VERSION is authoritative). Do not hand-edit.
+#define LUNAR_UPDATER_VERSION L"@PROJECT_VERSION@"
+#define LUNAR_UPDATER_VERSION_A "@PROJECT_VERSION@"

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LunarPlayerAI.msi — optional AI Subtitle Studio payload (whisper/ggml
+  runtime DLLs; models are download-on-demand and never bundled).
+  Installed only when the Burn variable InstallAI = 1.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <?define LunarVersion="$(env.LUNAR_VERSION)" ?>
+  <?define AiUpgradeCode = "abe66299-a28b-4849-abe1-d04c48642bbc" ?>
+
+  <Product Id="*" Name="Lunar Player AI Subtitle Studio" Language="1033"
+           Version="$(var.LunarVersion)" Manufacturer="SSK"
+           UpgradeCode="$(var.AiUpgradeCode)">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"
+             Description="Lunar Player AI Subtitle Studio" Manufacturer="SSK" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Lunar Player">
+          <!-- heat-generated AI payload: <ComponentGroupRef Id="AiPayload" /> -->
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="AISubtitleStudio" Title="AI Subtitle Studio" Level="1">
+      <ComponentGroupRef Id="AiPayload" />
+    </Feature>
+  </Product>
+</Wix>

@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LunarPlayer bundle (WiX v3.14 Burn). Single authoritative install engine.
+  Upgrade identity: fixed UpgradeCode below (related-bundle upgrades across
+  releases). Version is bound at packaging time from the single version
+  source (CMake project VERSION -> LUNAR_VERSION env -> bundle Version).
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <?define LunarVersion="$(env.LUNAR_VERSION)" ?>
+  <?define BundleUpgradeCode = "3271877f-f303-4bb0-a5f1-7be4f81ab88e" ?>
+  <?define AppUpgradeCode = "19dfe483-afb3-4442-a6cf-d63ae4774e95" ?>
+  <?define AiUpgradeCode = "abe66299-a28b-4849-abe1-d04c48642bbc" ?>
+
+  <Bundle Name="Lunar Player" Version="$(var.LunarVersion)"
+          Manufacturer="SSK" UpgradeCode="$(var.BundleUpgradeCode)"
+          IconSourceFile="$(var.AssetsDir)\LunarPlayer.ico"
+          AboutUrl="https://github.com/ssk-animator/LunarPlayer"
+          HelpUrl="https://github.com/ssk-animator/LunarPlayer"
+          UpdateUrl="https://github.com/ssk-animator/LunarPlayer/releases">
+    <!-- Custom native BA (React + WebView2). No standard wizard UI.
+         v3 contract: SourceFile is the DLL with the bootstrapper
+         application entry function (BootstrapperApplicationProc). -->
+    <BootstrapperApplication SourceFile="$(var.BADir)\LunarBA.dll">
+      <!-- BA payload: the built React UI tree (generated UIPayload group:
+           ui\dist\* with structure preserved for virtual-host serving). -->
+      <PayloadGroupRef Id="UIPayload" />
+    </BootstrapperApplication>
+
+    <Variable Name="InstallFolder"
+              Value="[ProgramFiles64Folder]Lunar Player" />
+    <Variable Name="InstallAI" Value="1" />
+    <Variable Name="InstallAIModels" Value="0" />
+
+    <util:RegistrySearch Id="VC143Search" Root="HKLM"
+        Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+        Value="Version" Result="exists" Variable="VC143Installed" />
+
+    <Chain>
+      <!-- Launcher model: large payloads download from URLs generated at
+           packaging time (Downloads.wxi); the bundle carries only the BA,
+           the UI, and the engine. Verification (size + SHA-256) is
+           enforced by Burn before anything executes. -->
+      <!-- VC++ runtime (central servicing, quiet, no restart). -->
+      <ExePackage Id="VC143Redist" Cache="yes" Compressed="no"
+                  Permanent="yes" Vital="yes" PerMachine="yes"
+                  Name="vc_redist.x64.exe"
+                  DownloadUrl="$(var.VcRedistUrl)"
+                  DetectCondition="VC143Installed"
+                  InstallCommand="/install /quiet /norestart"
+                  RepairCommand="/repair /quiet /norestart">
+        <RemotePayload Description="Microsoft Visual C++ Redistributable"
+                       ProductName="Microsoft Visual C++ 2015-2022 Redistributable (x64)"
+                       Version="14.42.34438.0"
+                       Size="$(var.VcRedistSize)"
+                       Hash="$(var.VcRedistHash)" />
+      </ExePackage>
+
+      <!-- Core player + FFmpeg/Media Engine (required). Downloadable
+           external payload: SourceFile is the build-time reference,
+           Compressed="no" keeps it out of the bundle, DownloadUrl is
+           the runtime source. NOTE: WiX v3 allows RemotePayload only
+           under ExePackage/MsuPackage (CNDL0383 otherwise); for
+           MsiPackage, light hashes SourceFile at link time and Burn
+           writes that size+SHA-256 into the manifest, verifying the
+           downloaded bytes before anything executes (a mismatch
+           aborts honestly, never runs). Authenticode is verified at
+           install (SuppressSignatureVerification stays default-off);
+           bundle-level size/hash enforcement lives in the updater. -->
+      <MsiPackage Id="LunarPlayerApp" Cache="yes" Vital="yes"
+                  DisplayInternalUI="no" Name="LunarPlayer.msi"
+                  SourceFile="$(var.MsiDir)\LunarPlayer.msi"
+                  Compressed="no"
+                  DownloadUrl="$(var.AppMsiUrl)" />
+
+      <!-- AI Subtitle Studio (optional feature package). -->
+      <MsiPackage Id="LunarPlayerAI" Cache="yes" Vital="no"
+                  DisplayInternalUI="no"
+                  InstallCondition="InstallAI = 1"
+                  Name="LunarPlayerAI.msi"
+                  SourceFile="$(var.MsiDir)\LunarPlayerAI.msi"
+                  Compressed="no"
+                  DownloadUrl="$(var.AiMsiUrl)" />
+
+      <!-- AI models: download-on-demand, never bundled. The packaging
+           script injects the ExePackage with DownloadUrl + verified
+           RemotePayload hash when the model fetcher exists; until then
+           the models install through first-run Studio download. -->
+    </Chain>
+  </Bundle>
+</Wix>
