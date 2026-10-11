@@ -236,6 +236,6 @@ addEventListener("keydown", (e) => {
 
 /* download CTAs point at the real GitHub Release asset — toast only, never block the native download */
 $$(".js-download").forEach((a) => a.addEventListener("click", () => {
-  showToast("Downloading Lunar Player Installer (v0.1.0-alpha)…");
+  showToast("Downloading Lunar Player Installer (v0.1.1-alpha)…");
 }));
 })();
